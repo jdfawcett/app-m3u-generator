@@ -41,7 +41,7 @@ ENABLED_SERVICES = [
 # Use ["us", "all"] to generate only US and the combined playlist.
 # Use ["*"] for every individual region but no combined playlist.
 REGION_CODES = [
-    "*",      # all discovered regions
+    "us",      # all discovered regions
     "all",    # combined playlist
 ]
 
