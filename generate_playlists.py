@@ -1,3 +1,848 @@
+import argparse
+import gzip
+import json
+import logging
+import os
+import random
+import re
+import shutil
+import time
+import uuid
+import xml.etree.ElementTree as ET
+
+import requests
+import urllib3
+from bs4 import BeautifulSoup
+from datetime import datetime
+from io import BytesIO
+from urllib.parse import unquote, urlparse, urlunparse
+
+# Disable the InsecureRequestWarning
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# ============================================================
+# USER CONFIGURATION
+# ============================================================
+# Edit the values below to control what the script generates.
+# Command-line arguments (see --help) override these defaults.
+# ============================================================
+
+# --- Services to generate playlists for ---
+ENABLED_SERVICES = [
+    "pluto",
+    "plex",
+    "samsungtvplus",
+    "tubi",
+    "roku",
+]
+
+# --- Region selection ---
+# Use ["*", "all"] to generate every discovered region plus a combined "all" playlist.
+# Use ["us", "all"] to generate only US and the combined playlist.
+# Use ["*"] for every individual region but no combined playlist.
+REGION_CODES = [
+    "*",      # all discovered regions
+    "all",    # combined playlist
+]
+
+# --- Channel / group filtering ---
+# If INCLUDE_GROUPS is empty, all groups are allowed (unless excluded).
+# If INCLUDE_GROUPS is non-empty, only those groups are allowed.
+# EXCLUDE_GROUPS always removes matching groups.
+INCLUDE_GROUPS = []
+EXCLUDE_GROUPS = []
+
+# If INCLUDE_CHANNEL_KEYWORDS is empty, all channels are allowed (unless excluded).
+# If INCLUDE_CHANNEL_KEYWORDS is non-empty, a channel is only included when its
+# name or group contains at least one of the keywords.
+# EXCLUDE_CHANNEL_KEYWORDS removes channels whose name or group matches any keyword.
+# All matching is case-insensitive.
+INCLUDE_CHANNEL_KEYWORDS = []
+EXCLUDE_CHANNEL_KEYWORDS = []
+
+# --- Display name prefixes per service ---
+# When set, channel display names are prefixed, e.g. "Pluto - CNN"
+SERVICE_NAME_PREFIXES = {
+    "pluto": "",
+    "plex": "",
+    "samsungtvplus": "",
+    "tubi": "",
+    "roku": "",
+}
+
+# --- Output settings ---
+OUTPUT_DIR = "playlists"
+CLEAN_OUTPUT_DIR_ON_START = True
+
+# --- HTTP settings ---
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/126.0.0.0 Safari/537.36"
+)
+REQUEST_TIMEOUT = 30
+FETCH_RETRIES = 3
+VERIFY_SSL = False
+
+# --- Region code to display-name mapping ---
+REGION_MAP = {
+    "us": "United States", "gb": "United Kingdom", "ca": "Canada",
+    "de": "Germany", "at": "Austria", "ch": "Switzerland",
+    "es": "Spain", "fr": "France", "it": "Italy", "br": "Brazil",
+    "mx": "Mexico", "ar": "Argentina", "cl": "Chile", "co": "Colombia",
+    "pe": "Peru", "se": "Sweden", "no": "Norway", "dk": "Denmark",
+    "in": "India", "jp": "Japan", "kr": "South Korea", "au": "Australia",
+}
+
+# Regions sorted first in combined "all" playlists
+TOP_REGIONS = ["United States", "Canada", "United Kingdom"]
+
+# --- Service data-source URLs ---
+SERVICE_URLS = {
+    "pluto": "https://github.com/matthuisman/i.mjh.nz/raw/refs/heads/master/PlutoTV/.channels.json.gz",
+    "plex": "https://github.com/matthuisman/i.mjh.nz/raw/refs/heads/master/Plex/.channels.json.gz",
+    "samsungtvplus": "https://github.com/matthuisman/i.mjh.nz/raw/refs/heads/master/SamsungTVPlus/.channels.json.gz",
+    "roku": "https://i.mjh.nz/Roku/.channels.json",
+    "tubi": "https://tubitv.com/live",
+}
+
+# --- Service-specific settings ---
+SERVICE_SETTINGS = {
+    "pluto": {
+        "epg_url_template": "https://github.com/matthuisman/i.mjh.nz/raw/master/PlutoTV/{region}.xml.gz",
+        "stream_url_template": "https://jmp2.uk/plu-{id}.m3u8",
+        "filename_template": "plutotv_{region}.m3u",
+    },
+    "plex": {
+        "epg_url_template": "https://github.com/matthuisman/i.mjh.nz/raw/master/Plex/{region}.xml.gz",
+        "stream_url_template": "https://epg.provider.plex.tv/library/parts/{id}/?X-Plex-Token={token}",
+        "filename_template": "plex_{region}.m3u",
+        "auth_url": "https://clients.plex.tv/api/v2/users/anonymous",
+        "x_forward_ips": {"us": "76.81.9.69"},
+    },
+    "samsungtvplus": {
+        "epg_url_template": "https://github.com/matthuisman/i.mjh.nz/raw/master/SamsungTVPlus/{region}.xml.gz",
+        "stream_url_prefix": "https://jmp2.uk/",
+        "filename_template": "samsungtvplus_{region}.m3u",
+    },
+    "roku": {
+        "epg_url": "https://github.com/matthuisman/i.mjh.nz/raw/master/Roku/all.xml.gz",
+        "stream_url_template": "https://jmp2.uk/rok-{id}.m3u8",
+        "filename": "roku_all.m3u",
+    },
+    "tubi": {
+        "epg_api_url": "https://tubitv.com/oz/epg/programming",
+        "epg_filename": "tubi_epg.xml",
+        "proxy_country": "US",
+        "epg_group_size": 150,
+        "filename": "tubi_all.m3u",
+    },
+}
+
+# --- Roku genre-to-group mapping ---
+# Maps granular Roku genre tags to consolidated group names.
+ROKU_GROUP_MAP = {
+    # News & Weather
+    "News": "News", "Newsmagazine": "News", "Special": "News", "Politics": "News",
+    "Weather": "Weather",
+
+    # Sports (general)
+    "Sports": "Sports", "Sports Talk": "Sports", "Olympics": "Sports",
+    "Action Sports": "Sports", "Action": "Sports",
+
+    # Sports (specific)
+    "Baseball": "Sports", "Basketball": "Sports", "Football": "Sports",
+    "Soccer": "Sports", "Hockey": "Sports", "Tennis": "Sports", "Golf": "Sports",
+    "Boxing": "Sports", "Mixed Martial Arts": "Sports", "Martial Arts": "Sports",
+    "Wrestling": "Sports", "Rugby": "Sports", "Volleyball": "Sports",
+    "Skateboarding": "Sports", "Snowboarding": "Sports", "Surfing": "Sports",
+    "Cycling": "Sports", "Bicycle": "Sports", "Bmx Racing": "Sports",
+    "Bullfighting": "Sports", "Rodeo": "Sports", "Western": "Sports",
+    "Fishing": "Sports", "Hunting": "Sports", "Outdoors": "Sports",
+    "Boat Racing": "Sports", "Drag Racing": "Sports", "Motorsports": "Sports",
+    "Motorcycle": "Sports", "Motorcycle Racing": "Sports",
+    "Judo": "Sports", "Karate": "Sports", "Billiards": "Sports",
+
+    # Auto
+    "Auto": "Auto & Motorsports", "Auto Racing": "Auto & Motorsports",
+
+    # Movies
+    "Adventure": "Movies", "Thriller": "Movies", "Suspense": "Movies",
+    "Science Fiction": "Movies", "Fantasy": "Movies", "Horror": "Movies",
+
+    # TV / Entertainment
+    "Entertainment": "TV & Entertainment", "Sitcom": "TV & Entertainment",
+    "Drama": "TV & Entertainment", "Soap": "TV & Entertainment",
+    "Talk": "TV & Entertainment", "Reality": "TV & Entertainment",
+    "Comedy Drama": "TV & Entertainment", "History": "TV & Entertainment",
+
+    # Comedy
+    "Comedy": "Comedy", "Romantic Comedy": "Comedy",
+
+    # Romance
+    "Romance": "Romance",
+
+    # Documentary
+    "Documentary": "Documentary", "Nature": "Documentary",
+
+    # Music
+    "Music": "Music",
+
+    # Anime
+    "Anime": "Anime",
+
+    # Gaming & Tech
+    "Gaming": "Gaming & Tech", "Computers": "Gaming & Tech",
+    "Esports": "Gaming & Tech",
+
+    # Faith
+    "Faith": "Faith & Family", "Religious": "Faith & Family",
+    "Family": "Faith & Family",
+
+    # Health
+    "Health": "Health", "Medical": "Health",
+}
+
+# ============================================================
+# END USER CONFIGURATION
+# ============================================================
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
+
+# --- Shared filtering and utility functions ---
+
+def normalize_text(value):
+    """Lowercase and strip whitespace for case-insensitive comparison."""
+    return str(value).strip().lower()
+
+
+def service_enabled(service_name):
+    return normalize_text(service_name) in [normalize_text(s) for s in ENABLED_SERVICES]
+
+
+def region_enabled(region_code):
+    """Check whether a region code should be generated.
+
+    "*" in REGION_CODES means all discovered individual regions.
+    "all" means the combined playlist.
+    Specific codes like "us" mean only that region.
+    """
+    codes = [normalize_text(c) for c in REGION_CODES]
+    region_lower = normalize_text(region_code)
+
+    if region_lower == "all":
+        return "all" in codes
+    # Any individual region passes when "*" is present, or when explicitly listed
+    return "*" in codes or region_lower in codes
+
+
+def group_allowed(group):
+    g = normalize_text(group)
+    if EXCLUDE_GROUPS and any(normalize_text(ex) == g for ex in EXCLUDE_GROUPS):
+        return False
+    if INCLUDE_GROUPS and not any(normalize_text(inc) == g for inc in INCLUDE_GROUPS):
+        return False
+    return True
+
+
+def channel_allowed(name, group, service_name=None):
+    """Return True if a channel passes all include/exclude filters."""
+    n = normalize_text(name)
+    g = normalize_text(group)
+    combined = n + " " + g
+
+    if not group_allowed(group):
+        return False
+
+    if EXCLUDE_CHANNEL_KEYWORDS:
+        for kw in EXCLUDE_CHANNEL_KEYWORDS:
+            if normalize_text(kw) in combined:
+                return False
+
+    if INCLUDE_CHANNEL_KEYWORDS:
+        if not any(normalize_text(kw) in combined for kw in INCLUDE_CHANNEL_KEYWORDS):
+            return False
+
+    return True
+
+
+def apply_prefix(display_name, service_name):
+    prefix = SERVICE_NAME_PREFIXES.get(service_name, "")
+    if prefix:
+        return prefix + display_name
+    return display_name
+
+
+# --- Core helper functions ---
+
+def cleanup_output_dir():
+    if os.path.exists(OUTPUT_DIR):
+        logger.info(f"Cleaning up old playlists in {OUTPUT_DIR}...")
+        for filename in os.listdir(OUTPUT_DIR):
+            file_path = os.path.join(OUTPUT_DIR, filename)
+            try:
+                if os.path.isfile(file_path) or os.path.islink(file_path):
+                    os.unlink(file_path)
+                elif os.path.isdir(file_path):
+                    shutil.rmtree(file_path)
+            except Exception as e:
+                logger.error(f"Failed to delete {file_path}: {e}")
+    else:
+        os.makedirs(OUTPUT_DIR)
+
+
+def fetch_url(url, is_json=True, is_gzipped=False, headers=None, stream=False, retries=None):
+    if retries is None:
+        retries = FETCH_RETRIES
+    headers = headers or {"User-Agent": USER_AGENT}
+    for i in range(retries):
+        try:
+            response = requests.get(
+                url, headers=headers, timeout=REQUEST_TIMEOUT,
+                stream=stream, verify=VERIFY_SSL,
+            )
+            if response.status_code == 429:
+                time.sleep((i + 1) * 10 + random.uniform(0, 5))
+                continue
+            response.raise_for_status()
+            content = response.content
+            if is_gzipped:
+                try:
+                    with gzip.GzipFile(fileobj=BytesIO(content), mode="rb") as f:
+                        content = f.read()
+                    content = content.decode("utf-8")
+                except Exception:
+                    content = content.decode("utf-8")
+            else:
+                content = content.decode("utf-8")
+            return json.loads(content) if is_json else content
+        except Exception as e:
+            logger.warning(f"Fetch failed (attempt {i+1}): {e}")
+            if i < retries - 1:
+                time.sleep(5)
+    return None
+
+
+def write_m3u_file(filename, content):
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    filepath = os.path.join(OUTPUT_DIR, filename)
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(content)
+
+
+def format_extinf(channel_id, tvg_id, tvg_chno, tvg_name, tvg_logo, group_title, display_name):
+    chno_str = str(tvg_chno) if tvg_chno and str(tvg_chno).isdigit() else ""
+    return (
+        f'#EXTINF:-1 channel-id="{channel_id}" tvg-id="{tvg_id}" tvg-chno="{chno_str}" '
+        f'tvg-name="{tvg_name.replace(chr(34), chr(39))}" tvg-logo="{tvg_logo}" '
+        f'group-title="{group_title.replace(chr(34), chr(39))}",{display_name.replace(",", "")}\n'
+    )
+
+
+# --- PlutoTV ---
+
+def generate_pluto_m3u():
+    svc = "pluto"
+    cfg = SERVICE_SETTINGS[svc]
+    data = fetch_url(SERVICE_URLS[svc], is_json=True, is_gzipped=True)
+    if not data or "regions" not in data:
+        return
+
+    regions_to_process = []
+    for r in data["regions"].keys():
+        if region_enabled(r):
+            regions_to_process.append(r)
+    if region_enabled("all"):
+        regions_to_process.append("all")
+
+    for region in regions_to_process:
+        is_all = region == "all"
+        epg_url = cfg["epg_url_template"].format(region=region)
+        output_lines = [f'#EXTM3U url-tvg="{epg_url}"\n']
+        channels = {}
+
+        if is_all:
+            for r_code, r_data in data["regions"].items():
+                country_name = REGION_MAP.get(r_code.lower(), r_code.upper())
+                for c_id, c_info in r_data.get("channels", {}).items():
+                    channels[f"{c_id}-{r_code}"] = {
+                        **c_info,
+                        "original_id": c_id,
+                        "country_group": country_name,
+                        "service_group": c_info.get("group", "Other"),
+                    }
+        else:
+            region_data = data["regions"].get(region, {}).get("channels", {})
+            country_name = REGION_MAP.get(region.lower(), region.upper())
+            for c_id, c_info in region_data.items():
+                channels[c_id] = {
+                    **c_info,
+                    "original_id": c_id,
+                    "country_group": country_name,
+                    "service_group": c_info.get("group", "Other"),
+                }
+
+        sorted_channels = sorted(
+            channels.items(),
+            key=lambda x: (0 if x[1]["country_group"] in TOP_REGIONS else 1, x[1].get("name", "")),
+        )
+
+        for c_id, ch in sorted_channels:
+            group_title = ch["country_group"] if is_all else ch["service_group"]
+            name = ch["name"]
+            if not channel_allowed(name, group_title, svc):
+                continue
+            display_name = apply_prefix(name, svc)
+            stream_url = cfg["stream_url_template"].format(id=ch["original_id"])
+
+            output_lines.extend([
+                format_extinf(c_id, ch["original_id"], ch.get("chno"), name, ch["logo"], group_title, display_name),
+                f"{stream_url}\n",
+            ])
+
+        if len(output_lines) > 1:
+            write_m3u_file(cfg["filename_template"].format(region=region), "".join(output_lines))
+
+
+# --- Plex ---
+
+def get_anonymous_token(region: str = "us") -> str | None:
+    cfg = SERVICE_SETTINGS["plex"]
+    client_id = str(uuid.uuid4()).replace("-", "")
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": USER_AGENT,
+        "X-Plex-Product": "Plex Web",
+        "X-Plex-Version": "4.150.0",
+        "X-Plex-Client-Identifier": client_id,
+        "X-Plex-Platform": "Web",
+    }
+    x_forward_ips = cfg.get("x_forward_ips", {})
+    if region in x_forward_ips:
+        headers["X-Forwarded-For"] = x_forward_ips[region]
+    params = {"X-Plex-Product": "Plex Web", "X-Plex-Client-Identifier": client_id}
+    try:
+        resp = requests.post(cfg["auth_url"], headers=headers, params=params, timeout=15)
+        resp.raise_for_status()
+        return resp.json().get("authToken")
+    except Exception:
+        return None
+
+
+def generate_plex_m3u():
+    svc = "plex"
+    cfg = SERVICE_SETTINGS[svc]
+    data = fetch_url(SERVICE_URLS[svc], is_json=True, is_gzipped=True)
+    if not data or "channels" not in data:
+        return
+
+    found_regions = set()
+    for ch in data["channels"].values():
+        found_regions.update(ch.get("regions", []))
+
+    regions_to_process = []
+    for r in found_regions:
+        if region_enabled(r):
+            regions_to_process.append(r)
+    if region_enabled("all"):
+        regions_to_process.append("all")
+
+    for region in regions_to_process:
+        token = get_anonymous_token(region if region != "all" else "us")
+        if not token:
+            continue
+        epg_url = cfg["epg_url_template"].format(region=region)
+        output_lines = [f'#EXTM3U url-tvg="{epg_url}"\n']
+        channel_list = []
+
+        for c_id, ch in data["channels"].items():
+            if region == "all" or region in ch.get("regions", []):
+                if region != "all":
+                    group = REGION_MAP.get(region.lower(), region.upper())
+                else:
+                    first_region = ch.get("regions", [""])[0]
+                    group = REGION_MAP.get(first_region.lower(), first_region.upper()) if first_region else "Other"
+                name = ch["name"]
+                if not channel_allowed(name, group, svc):
+                    continue
+                display_name = apply_prefix(name, svc)
+                stream_url = cfg["stream_url_template"].format(id=c_id, token=token)
+                channel_list.append((
+                    group, name.lower(),
+                    format_extinf(c_id, c_id, ch.get("chno"), name, ch.get("logo", ""), group, display_name),
+                    f"{stream_url}\n",
+                ))
+
+        if channel_list:
+            channel_list.sort(key=lambda x: (0 if x[0] in TOP_REGIONS else 1, x[1]))
+            for _, _, extinf, url in channel_list:
+                output_lines.extend([extinf, url])
+            write_m3u_file(cfg["filename_template"].format(region=region), "".join(output_lines))
+
+
+# --- Samsung TV Plus ---
+
+def generate_samsungtvplus_m3u():
+    svc = "samsungtvplus"
+    cfg = SERVICE_SETTINGS[svc]
+    data = fetch_url(SERVICE_URLS[svc], is_json=True, is_gzipped=True)
+    if not data or "regions" not in data:
+        return
+    slug_template = data.get("slug", "{id}.m3u8")
+
+    regions_to_process = []
+    for r in data["regions"].keys():
+        if region_enabled(r):
+            regions_to_process.append(r)
+    if region_enabled("all"):
+        regions_to_process.append("all")
+
+    for region in regions_to_process:
+        is_all = region == "all"
+        epg_url = cfg["epg_url_template"].format(region=region)
+        output_lines = [f'#EXTM3U url-tvg="{epg_url}"\n']
+        channels = {}
+
+        if is_all:
+            for r_code, r_info in data["regions"].items():
+                country_name = REGION_MAP.get(r_code.lower(), r_code.upper())
+                for c_id, c_info in r_info.get("channels", {}).items():
+                    channels[f"{c_id}-{r_code}"] = {
+                        **c_info,
+                        "original_id": c_id,
+                        "country_group": country_name,
+                        "service_group": c_info.get("group", "Other"),
+                    }
+        else:
+            region_data = data["regions"].get(region, {}).get("channels", {})
+            country_name = REGION_MAP.get(region.lower(), region.upper())
+            for c_id, c_info in region_data.items():
+                channels[c_id] = {
+                    **c_info,
+                    "original_id": c_id,
+                    "country_group": country_name,
+                    "service_group": c_info.get("group", "Other"),
+                }
+
+        sorted_channels = sorted(
+            channels.items(),
+            key=lambda x: (0 if x[1]["country_group"] in TOP_REGIONS else 1, x[1].get("name", "").lower()),
+        )
+
+        for c_id, ch in sorted_channels:
+            group_title = ch["country_group"] if is_all else ch["service_group"]
+            name = ch["name"]
+            if not channel_allowed(name, group_title, svc):
+                continue
+            display_name = apply_prefix(name, svc)
+            slug = slug_template.replace("{id}", ch["original_id"])
+            stream_url = cfg["stream_url_prefix"] + slug
+
+            output_lines.extend([
+                format_extinf(c_id, ch["original_id"], ch.get("chno"), name, ch["logo"], group_title, display_name),
+                f"{stream_url}\n",
+            ])
+
+        if len(output_lines) > 1:
+            write_m3u_file(cfg["filename_template"].format(region=region), "".join(output_lines))
+
+
+# --- Roku ---
+
+def generate_roku_m3u():
+    svc = "roku"
+    cfg = SERVICE_SETTINGS[svc]
+    data = fetch_url(SERVICE_URLS[svc], is_json=True)
+    if not data:
+        return
+
+    channels = data.get("channels", {})
+
+    group_map = {}
+    for c_id, ch in channels.items():
+        raw_group = ch["groups"][0] if ch.get("groups") else "Other"
+        group = ROKU_GROUP_MAP.get(raw_group, raw_group)
+        group_map.setdefault(group, []).append((c_id, ch))
+
+    output_lines = [f'#EXTM3U url-tvg="{cfg["epg_url"]}"\n']
+    for group in sorted(group_map.keys()):
+        if not group_allowed(group):
+            continue
+        for c_id, ch in sorted(group_map[group], key=lambda x: x[1].get("name", "").lower()):
+            name = ch["name"]
+            if not channel_allowed(name, group, svc):
+                continue
+            display_name = apply_prefix(name, svc)
+            stream_url = cfg["stream_url_template"].format(id=c_id)
+            output_lines.extend([
+                format_extinf(c_id, c_id, ch.get("chno"), name, ch["logo"], group, display_name),
+                f"{stream_url}\n",
+            ])
+
+    if len(output_lines) > 1:
+        write_m3u_file(cfg["filename"], "".join(output_lines))
+
+
+# --- Tubi scraping logic ---
+
+def get_proxies(country_code):
+    url = (
+        f"https://api.proxyscrape.com/v2/?request=displayproxies"
+        f"&protocol=socks4&timeout=10000&country={country_code}&ssl=all&anonymity=elite"
+    )
+    try:
+        response = requests.get(url, timeout=REQUEST_TIMEOUT)
+        if response.status_code == 200:
+            return [f"socks4://{p}" for p in response.text.splitlines() if p.strip()]
+    except Exception:
+        pass
+    return []
+
+
+def fetch_channel_list(proxy, retries=3):
+    tubi_url = SERVICE_URLS["tubi"]
+    for attempt in range(retries):
+        try:
+            kwargs = {"verify": VERIFY_SSL, "timeout": 20}
+            if proxy:
+                kwargs["proxies"] = {"http": proxy, "https": proxy}
+            response = requests.get(tubi_url, **kwargs)
+            response.encoding = "utf-8"
+            if response.status_code != 200:
+                continue
+
+            html_content = response.content.decode("utf-8", errors="replace")
+            soup = BeautifulSoup(html_content, "html.parser")
+            target_script = None
+            for script in soup.find_all("script"):
+                if script.string and script.string.strip().startswith("window.__data"):
+                    target_script = script.string
+                    break
+            if not target_script:
+                continue
+
+            start_index = target_script.find("{")
+            end_index = target_script.rfind("}") + 1
+            json_string = target_script[start_index:end_index]
+            json_string = json_string.replace("undefined", "null")
+            json_string = re.sub(r'new Date\("([^"]*)"\)', r'"\1"', json_string)
+            return json.loads(json_string)
+        except Exception:
+            continue
+    return []
+
+
+def create_group_mapping(json_data):
+    group_mapping = {}
+    content_ids_by_container = json_data.get("epg", {}).get("contentIdsByContainer", {})
+    for container_list in content_ids_by_container.values():
+        for category in container_list:
+            group_name = category.get("name", "Other")
+            for content_id in category.get("contents", []):
+                group_mapping[str(content_id)] = group_name
+    return group_mapping
+
+
+def fetch_epg_data(channel_list):
+    cfg = SERVICE_SETTINGS["tubi"]
+    epg_data = []
+    group_size = cfg["epg_group_size"]
+    grouped_ids = [channel_list[i:i + group_size] for i in range(0, len(channel_list), group_size)]
+    for group in grouped_ids:
+        params = {"content_id": ",".join(map(str, group))}
+        try:
+            response = requests.get(cfg["epg_api_url"], params=params, timeout=REQUEST_TIMEOUT)
+            if response.status_code == 200:
+                epg_data.extend(response.json().get("rows", []))
+        except Exception:
+            pass
+    return epg_data
+
+
+def clean_stream_url(url):
+    parsed_url = urlparse(url)
+    return urlunparse((parsed_url.scheme, parsed_url.netloc, parsed_url.path, "", "", ""))
+
+
+def create_m3u_playlist(epg_data, group_mapping):
+    svc = "tubi"
+    cfg = SERVICE_SETTINGS[svc]
+    sorted_epg_data = sorted(epg_data, key=lambda x: x.get("title", "").lower())
+    playlist = f'#EXTM3U url-tvg="{cfg["epg_filename"]}"\n'
+    seen_urls = set()
+
+    for elem in sorted_epg_data:
+        channel_name = elem.get("title", "Unknown Channel").encode("utf-8", errors="ignore").decode("utf-8")
+        stream_url = unquote(elem["video_resources"][0]["manifest"]["url"]) if elem.get("video_resources") else ""
+        clean_url = clean_stream_url(stream_url)
+        tvg_id = str(elem.get("content_id", ""))
+        logo_url = elem.get("images", {}).get("thumbnail", [None])[0]
+        group_title = group_mapping.get(tvg_id, "Other").encode("utf-8", errors="ignore").decode("utf-8")
+
+        if not channel_allowed(channel_name, group_title, svc):
+            continue
+        display_name = apply_prefix(channel_name, svc)
+
+        if clean_url and clean_url not in seen_urls:
+            playlist += (
+                f'#EXTINF:-1 tvg-id="{tvg_id}" tvg-logo="{logo_url}" '
+                f'group-title="{group_title}",{display_name}\n{clean_url}\n'
+            )
+            seen_urls.add(clean_url)
+    return playlist
+
+
+def create_epg_xml(epg_data):
+    root = ET.Element("tv")
+    for station in epg_data:
+        channel = ET.SubElement(root, "channel", id=str(station.get("content_id")))
+        ET.SubElement(channel, "display-name").text = station.get("title", "Unknown Title")
+        ET.SubElement(channel, "icon", src=station.get("images", {}).get("thumbnail", [None])[0])
+        for program in station.get("programs", []):
+            programme = ET.SubElement(root, "programme", channel=str(station.get("content_id")))
+            start = program.get("start_time", "")
+            stop = program.get("end_time", "")
+            try:
+                dt_start = datetime.strptime(start, "%Y-%m-%dT%H:%M:%SZ")
+                dt_stop = datetime.strptime(stop, "%Y-%m-%dT%H:%M:%SZ")
+                programme.set("start", dt_start.strftime("%Y%m%d%H%M%S +0000"))
+                programme.set("stop", dt_stop.strftime("%Y%m%d%H%M%S +0000"))
+            except Exception:
+                programme.set("start", start)
+                programme.set("stop", stop)
+            ET.SubElement(programme, "title").text = program.get("title", "")
+            if program.get("description"):
+                ET.SubElement(programme, "desc").text = program.get("description", "")
+    return ET.ElementTree(root)
+
+
+def generate_tubi_m3u():
+    svc = "tubi"
+    cfg = SERVICE_SETTINGS[svc]
+    proxies = get_proxies(cfg["proxy_country"])
+    json_data = None
+    if proxies:
+        for proxy in proxies:
+            json_data = fetch_channel_list(proxy)
+            if json_data:
+                break
+    if not json_data:
+        json_data = fetch_channel_list(None)
+    if not json_data:
+        return
+
+    channel_list = []
+    content_ids_by_container = json_data.get("epg", {}).get("contentIdsByContainer", {})
+    for container_list in content_ids_by_container.values():
+        for category in container_list:
+            channel_list.extend(category.get("contents", []))
+
+    epg_data = fetch_epg_data(channel_list)
+    if epg_data:
+        group_mapping = create_group_mapping(json_data)
+        m3u_playlist = create_m3u_playlist(epg_data, group_mapping)
+        epg_tree = create_epg_xml(epg_data)
+        write_m3u_file(cfg["filename"], m3u_playlist)
+        epg_tree.write(os.path.join(OUTPUT_DIR, cfg["epg_filename"]), encoding="utf-8", xml_declaration=True)
+
+
+# --- Service dispatch map ---
+
+SERVICE_GENERATORS = {
+    "pluto": generate_pluto_m3u,
+    "plex": generate_plex_m3u,
+    "samsungtvplus": generate_samsungtvplus_m3u,
+    "tubi": generate_tubi_m3u,
+    "roku": generate_roku_m3u,
+}
+
+# --- Command-line argument parsing ---
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Generate M3U playlists for free streaming services.",
+    )
+    parser.add_argument(
+        "--services",
+        help="Comma-separated list of services to generate (overrides ENABLED_SERVICES)",
+    )
+    parser.add_argument(
+        "--regions",
+        help='Comma-separated region codes to generate, e.g. "us,all" (overrides REGION_CODES)',
+    )
+    parser.add_argument(
+        "--include-groups",
+        help="Comma-separated group names to include (overrides INCLUDE_GROUPS)",
+    )
+    parser.add_argument(
+        "--exclude-groups",
+        help="Comma-separated group names to exclude (overrides EXCLUDE_GROUPS)",
+    )
+    parser.add_argument(
+        "--include-names",
+        help="Comma-separated keywords; only channels matching are included (overrides INCLUDE_CHANNEL_KEYWORDS)",
+    )
+    parser.add_argument(
+        "--exclude-names",
+        help="Comma-separated keywords; channels matching are excluded (overrides EXCLUDE_CHANNEL_KEYWORDS)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        help="Output directory (overrides OUTPUT_DIR)",
+    )
+    parser.add_argument(
+        "--no-clean",
+        action="store_true",
+        help="Skip cleaning the output directory on start",
+    )
+    return parser.parse_args()
+
+
+def apply_cli_overrides(args):
+    """Apply command-line overrides to the global configuration variables."""
+    global ENABLED_SERVICES, REGION_CODES, INCLUDE_GROUPS, EXCLUDE_GROUPS
+    global INCLUDE_CHANNEL_KEYWORDS, EXCLUDE_CHANNEL_KEYWORDS
+    global OUTPUT_DIR, CLEAN_OUTPUT_DIR_ON_START
+
+    if args.services:
+        ENABLED_SERVICES = [s.strip() for s in args.services.split(",") if s.strip()]
+    if args.regions:
+        REGION_CODES = [r.strip() for r in args.regions.split(",") if r.strip()]
+    if args.include_groups:
+        INCLUDE_GROUPS = [g.strip() for g in args.include_groups.split(",") if g.strip()]
+    if args.exclude_groups:
+        EXCLUDE_GROUPS = [g.strip() for g in args.exclude_groups.split(",") if g.strip()]
+    if args.include_names:
+        INCLUDE_CHANNEL_KEYWORDS = [k.strip() for k in args.include_names.split(",") if k.strip()]
+    if args.exclude_names:
+        EXCLUDE_CHANNEL_KEYWORDS = [k.strip() for k in args.exclude_names.split(",") if k.strip()]
+    if args.output_dir:
+        OUTPUT_DIR = args.output_dir
+    if args.no_clean:
+        CLEAN_OUTPUT_DIR_ON_START = False
+
+
+# --- Main execution ---
+
+if __name__ == "__main__":
+    cli_args = parse_args()
+    apply_cli_overrides(cli_args)
+
+    if CLEAN_OUTPUT_DIR_ON_START:
+        cleanup_output_dir()
+    else:
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    for svc_name in ENABLED_SERVICES:
+        generator = SERVICE_GENERATORS.get(normalize_text(svc_name))
+        if generator:
+            logger.info(f"Generating playlists for: {svc_name}")
+            generator()
+        else:
+            logger.warning(f"Unknown service: {svc_name}")
+
+    logger.info("Done.")
 import requests
 import gzip
 import json
