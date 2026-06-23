@@ -50,7 +50,7 @@ REGION_CODES = [
 # If INCLUDE_GROUPS is non-empty, only those groups are allowed.
 # EXCLUDE_GROUPS always removes matching groups.
 INCLUDE_GROUPS = []
-EXCLUDE_GROUPS = []
+EXCLUDE_GROUPS = ["Auto", "Faith","Health",]
 
 # If INCLUDE_CHANNEL_KEYWORDS is empty, all channels are allowed (unless excluded).
 # If INCLUDE_CHANNEL_KEYWORDS is non-empty, a channel is only included when its
