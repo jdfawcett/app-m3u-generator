@@ -18,21 +18,136 @@ from bs4 import BeautifulSoup
 # Disable the InsecureRequestWarning
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# --- Configuration ---
-OUTPUT_DIR = "playlists"
-USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
-REQUEST_TIMEOUT = 30 
+# =============================================================================
+# CONFIGURATION — Set all content-relevant variables here
+# =============================================================================
 
+# Output directory for generated playlists
+OUTPUT_DIR = "playlists"
+
+# HTTP settings
+USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
+REQUEST_TIMEOUT = 30
+FETCH_RETRIES = 3
+
+# Which services to generate playlists for (set to False to skip)
+ENABLE_PLUTOTV = True
+ENABLE_PLEX = True
+ENABLE_SAMSUNGTVPLUS = True
+ENABLE_ROKU = True
+ENABLE_TUBI = True
+
+# Region code to full name mapping (used across services)
 REGION_MAP = {
     'us': 'United States', 'gb': 'United Kingdom', 'ca': 'Canada',
     'de': 'Germany', 'at': 'Austria', 'ch': 'Switzerland',
     'es': 'Spain', 'fr': 'France', 'it': 'Italy', 'br': 'Brazil',
     'mx': 'Mexico', 'ar': 'Argentina', 'cl': 'Chile', 'co': 'Colombia',
     'pe': 'Peru', 'se': 'Sweden', 'no': 'Norway', 'dk': 'Denmark',
-    'in': 'India', 'jp': 'Japan', 'kr': 'South Korea', 'au': 'Australia'
+    'in': 'India', 'jp': 'Japan', 'kr': 'South Korea', 'au': 'Australia',
 }
 
+# Regions that sort first in "all" playlists
 TOP_REGIONS = ['United States', 'Canada', 'United Kingdom']
+
+# --- Data source URLs ---
+PLUTO_DATA_URL = 'https://github.com/matthuisman/i.mjh.nz/raw/refs/heads/master/PlutoTV/.channels.json.gz'
+PLUTO_EPG_URL_TEMPLATE = 'https://github.com/matthuisman/i.mjh.nz/raw/master/PlutoTV/{region}.xml.gz'
+PLUTO_STREAM_URL_TEMPLATE = 'https://jmp2.uk/plu-{id}.m3u8'
+
+PLEX_DATA_URL = 'https://github.com/matthuisman/i.mjh.nz/raw/refs/heads/master/Plex/.channels.json.gz'
+PLEX_EPG_URL_TEMPLATE = 'https://github.com/matthuisman/i.mjh.nz/raw/master/Plex/{region}.xml.gz'
+PLEX_STREAM_URL_TEMPLATE = 'https://epg.provider.plex.tv/library/parts/{id}/?X-Plex-Token={token}'
+PLEX_AUTH_URL = 'https://clients.plex.tv/api/v2/users/anonymous'
+PLEX_X_FORWARD_IPS = {'us': '76.81.9.69'}
+
+SAMSUNG_DATA_URL = 'https://github.com/matthuisman/i.mjh.nz/raw/refs/heads/master/SamsungTVPlus/.channels.json.gz'
+SAMSUNG_EPG_URL_TEMPLATE = 'https://github.com/matthuisman/i.mjh.nz/raw/master/SamsungTVPlus/{region}.xml.gz'
+SAMSUNG_STREAM_URL_TEMPLATE = 'https://jmp2.uk/{slug}'
+
+ROKU_DATA_URL = 'https://i.mjh.nz/Roku/.channels.json'
+ROKU_EPG_URL = 'https://github.com/matthuisman/i.mjh.nz/raw/master/Roku/all.xml.gz'
+ROKU_STREAM_URL_TEMPLATE = 'https://jmp2.uk/rok-{id}.m3u8'
+
+TUBI_LIVE_URL = 'https://tubitv.com/live'
+TUBI_EPG_API_URL = 'https://tubitv.com/oz/epg/programming'
+TUBI_EPG_FILENAME = 'tubi_epg.xml'
+TUBI_PROXY_COUNTRY = 'US'
+TUBI_EPG_GROUP_SIZE = 150
+
+# --- Roku genre-to-group mapping ---
+ROKU_GROUP_MAP = {
+    # News & Weather
+    'News': 'News', 'Newsmagazine': 'News', 'Special': 'News', 'Politics': 'News',
+    'Weather': 'Weather',
+
+    # Sports (general)
+    'Sports': 'Sports', 'Sports Talk': 'Sports', 'Olympics': 'Sports',
+    'Action Sports': 'Sports', 'Action': 'Sports',
+
+    # Sports (specific)
+    'Baseball': 'Sports', 'Basketball': 'Sports', 'Football': 'Sports',
+    'Soccer': 'Sports', 'Hockey': 'Sports', 'Tennis': 'Sports', 'Golf': 'Sports',
+    'Boxing': 'Sports', 'Mixed Martial Arts': 'Sports', 'Martial Arts': 'Sports',
+    'Wrestling': 'Sports', 'Rugby': 'Sports', 'Volleyball': 'Sports',
+    'Skateboarding': 'Sports', 'Snowboarding': 'Sports', 'Surfing': 'Sports',
+    'Cycling': 'Sports', 'Bicycle': 'Sports', 'Bmx Racing': 'Sports',
+    'Bullfighting': 'Sports', 'Rodeo': 'Sports', 'Western': 'Sports',
+    'Fishing': 'Sports', 'Hunting': 'Sports', 'Outdoors': 'Sports',
+    'Boat Racing': 'Sports', 'Drag Racing': 'Sports', 'Motorsports': 'Sports',
+    'Motorcycle': 'Sports', 'Motorcycle Racing': 'Sports',
+    'Judo': 'Sports', 'Karate': 'Sports', 'Billiards': 'Sports',
+
+    # Auto
+    'Auto': 'Auto & Motorsports', 'Auto Racing': 'Auto & Motorsports',
+
+    # Movies
+    'Adventure': 'Movies', 'Thriller': 'Movies', 'Suspense': 'Movies',
+    'Science Fiction': 'Movies', 'Fantasy': 'Movies', 'Horror': 'Movies',
+
+    # TV / Entertainment
+    'Entertainment': 'TV & Entertainment', 'Sitcom': 'TV & Entertainment',
+    'Drama': 'TV & Entertainment', 'Soap': 'TV & Entertainment',
+    'Talk': 'TV & Entertainment', 'Reality': 'TV & Entertainment',
+    'Comedy Drama': 'TV & Entertainment', 'History': 'TV & Entertainment',
+
+    # Comedy
+    'Comedy': 'Comedy', 'Romantic Comedy': 'Comedy',
+
+    # Romance
+    'Romance': 'Romance',
+
+    # Documentary
+    'Documentary': 'Documentary', 'Nature': 'Documentary',
+
+    # Music
+    'Music': 'Music',
+
+    # Anime
+    'Anime': 'Anime',
+
+    # Gaming & Tech
+    'Gaming': 'Gaming & Tech', 'Computers': 'Gaming & Tech',
+    'Esports': 'Gaming & Tech',
+
+    # Faith
+    'Faith': 'Faith & Family', 'Religious': 'Faith & Family',
+    'Family': 'Faith & Family',
+
+    # Health
+    'Health': 'Health', 'Medical': 'Health',
+}
+
+# --- Output filename templates ---
+PLUTO_FILENAME_TEMPLATE = 'plutotv_{region}.m3u'
+PLEX_FILENAME_TEMPLATE = 'plex_{region}.m3u'
+SAMSUNG_FILENAME_TEMPLATE = 'samsungtvplus_{region}.m3u'
+ROKU_FILENAME = 'roku_all.m3u'
+TUBI_FILENAME = 'tubi_all.m3u'
+
+# =============================================================================
+# END CONFIGURATION
+# =============================================================================
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -54,7 +169,9 @@ def cleanup_output_dir():
     else:
         os.makedirs(OUTPUT_DIR)
 
-def fetch_url(url, is_json=True, is_gzipped=False, headers=None, stream=False, retries=3):
+def fetch_url(url, is_json=True, is_gzipped=False, headers=None, stream=False, retries=None):
+    if retries is None:
+        retries = FETCH_RETRIES
     headers = headers or {'User-Agent': USER_AGENT}
     for i in range(retries):
         try:
@@ -101,22 +218,23 @@ def get_anonymous_token(region: str = 'us') -> str | None:
         'X-Plex-Client-Identifier': str(uuid.uuid4()).replace('-', ''),
         'X-Plex-Platform': 'Web',
     }
-    x_forward_ips = {'us': '76.81.9.69'}
-    if region in x_forward_ips: headers['X-Forwarded-For'] = x_forward_ips[region]
+    if region in PLEX_X_FORWARD_IPS:
+        headers['X-Forwarded-For'] = PLEX_X_FORWARD_IPS[region]
     params = {'X-Plex-Product': 'Plex Web', 'X-Plex-Client-Identifier': headers['X-Plex-Client-Identifier']}
     try:
-        resp = requests.post('https://clients.plex.tv/api/v2/users/anonymous', headers=headers, params=params, timeout=15)
+        resp = requests.post(PLEX_AUTH_URL, headers=headers, params=params, timeout=15)
         resp.raise_for_status()
         return resp.json().get('authToken')
     except: return None
 
 def generate_pluto_m3u():
-    data = fetch_url('https://github.com/matthuisman/i.mjh.nz/raw/refs/heads/master/PlutoTV/.channels.json.gz', is_json=True, is_gzipped=True)
+    data = fetch_url(PLUTO_DATA_URL, is_json=True, is_gzipped=True)
     if not data or 'regions' not in data: return
 
     for region in list(data['regions'].keys()) + ['all']:
         is_all = region == 'all'
-        output_lines = [f'#EXTM3U url-tvg="https://github.com/matthuisman/i.mjh.nz/raw/master/PlutoTV/{region}.xml.gz"\n']
+        epg_url = PLUTO_EPG_URL_TEMPLATE.format(region=region)
+        output_lines = [f'#EXTM3U url-tvg="{epg_url}"\n']
         channels = {}
 
         if is_all:
@@ -147,6 +265,7 @@ def generate_pluto_m3u():
 
         for c_id, ch in sorted_channels:
             group_title = ch['country_group'] if is_all else ch['service_group']
+            stream_url = PLUTO_STREAM_URL_TEMPLATE.format(id=ch['original_id'])
 
             output_lines.extend([
                 format_extinf(
@@ -158,38 +277,41 @@ def generate_pluto_m3u():
                     group_title,
                     ch['name']
                 ),
-                f"https://jmp2.uk/plu-{ch['original_id']}.m3u8\n"
+                f"{stream_url}\n"
             ])
 
-        write_m3u_file(f"plutotv_{region}.m3u", "".join(output_lines))
+        write_m3u_file(PLUTO_FILENAME_TEMPLATE.format(region=region), "".join(output_lines))
 
 def generate_plex_m3u():
-    data = fetch_url('https://github.com/matthuisman/i.mjh.nz/raw/refs/heads/master/Plex/.channels.json.gz', is_json=True, is_gzipped=True)
+    data = fetch_url(PLEX_DATA_URL, is_json=True, is_gzipped=True)
     if not data or 'channels' not in data: return
     found_regions = set()
     for ch in data['channels'].values(): found_regions.update(ch.get('regions', []))
     for region in list(found_regions) + ['all']:
         token = get_anonymous_token(region if region != 'all' else 'us')
         if not token: continue
-        output_lines = [f'#EXTM3U url-tvg="https://github.com/matthuisman/i.mjh.nz/raw/master/Plex/{region}.xml.gz"\n']
+        epg_url = PLEX_EPG_URL_TEMPLATE.format(region=region)
+        output_lines = [f'#EXTM3U url-tvg="{epg_url}"\n']
         channel_list = []
         for c_id, ch in data['channels'].items():
             if region == 'all' or region in ch.get('regions', []):
                 group = REGION_MAP.get(region.lower(), region.upper()) if region != 'all' else REGION_MAP.get(ch.get('regions', [''])[0].lower(), ch.get('regions', ['Other'])[0].upper())
-                channel_list.append((group, ch['name'].lower(), format_extinf(c_id, c_id, ch.get('chno'), ch['name'], ch.get('logo', ''), group, ch['name']), f"https://epg.provider.plex.tv/library/parts/{c_id}/?X-Plex-Token={token}\n"))
+                stream_url = PLEX_STREAM_URL_TEMPLATE.format(id=c_id, token=token)
+                channel_list.append((group, ch['name'].lower(), format_extinf(c_id, c_id, ch.get('chno'), ch['name'], ch.get('logo', ''), group, ch['name']), f"{stream_url}\n"))
         if channel_list:
             channel_list.sort(key=lambda x: (0 if x[0] in TOP_REGIONS else 1, x[1]))
             for _, _, extinf, url in channel_list: output_lines.extend([extinf, url])
-            write_m3u_file(f"plex_{region}.m3u", "".join(output_lines))
+            write_m3u_file(PLEX_FILENAME_TEMPLATE.format(region=region), "".join(output_lines))
 
 def generate_samsungtvplus_m3u():
-    data = fetch_url('https://github.com/matthuisman/i.mjh.nz/raw/refs/heads/master/SamsungTVPlus/.channels.json.gz', is_json=True, is_gzipped=True)
+    data = fetch_url(SAMSUNG_DATA_URL, is_json=True, is_gzipped=True)
     if not data or 'regions' not in data: return
     slug_template = data.get('slug', '{id}.m3u8')
 
     for region in list(data['regions'].keys()) + ['all']:
         is_all = region == 'all'
-        output_lines = [f'#EXTM3U url-tvg="https://github.com/matthuisman/i.mjh.nz/raw/master/SamsungTVPlus/{region}.xml.gz"\n']
+        epg_url = SAMSUNG_EPG_URL_TEMPLATE.format(region=region)
+        output_lines = [f'#EXTM3U url-tvg="{epg_url}"\n']
         channels = {}
 
         if is_all:
@@ -220,6 +342,8 @@ def generate_samsungtvplus_m3u():
 
         for c_id, ch in sorted_channels:
             group_title = ch['country_group'] if is_all else ch['service_group']
+            slug = slug_template.replace('{id}', ch['original_id'])
+            stream_url = SAMSUNG_STREAM_URL_TEMPLATE.format(slug=slug)
 
             output_lines.extend([
                 format_extinf(
@@ -231,77 +355,14 @@ def generate_samsungtvplus_m3u():
                     group_title,
                     ch['name']
                 ),
-                f"https://jmp2.uk/{slug_template.replace('{id}', ch['original_id'])}\n"
+                f"{stream_url}\n"
             ])
 
-        write_m3u_file(f"samsungtvplus_{region}.m3u", "".join(output_lines))
+        write_m3u_file(SAMSUNG_FILENAME_TEMPLATE.format(region=region), "".join(output_lines))
 
 def generate_roku_m3u():
-    data = fetch_url('https://i.mjh.nz/Roku/.channels.json', is_json=True)
+    data = fetch_url(ROKU_DATA_URL, is_json=True)
     if not data: return
-
-    # Map granular Roku genre tags to consolidated group names
-    ROKU_GROUP_MAP = {
-        # News & Weather
-        'News': 'News', 'Newsmagazine': 'News', 'Special': 'News', 'Politics': 'News',
-        'Weather': 'Weather',
-
-        # Sports (general)
-        'Sports': 'Sports', 'Sports Talk': 'Sports', 'Olympics': 'Sports',
-        'Action Sports': 'Sports', 'Action': 'Sports',
-
-        # Sports (specific — fold into Sports)
-        'Baseball': 'Sports', 'Basketball': 'Sports', 'Football': 'Sports',
-        'Soccer': 'Sports', 'Hockey': 'Sports', 'Tennis': 'Sports', 'Golf': 'Sports',
-        'Boxing': 'Sports', 'Mixed Martial Arts': 'Sports', 'Martial Arts': 'Sports',
-        'Wrestling': 'Sports', 'Rugby': 'Sports', 'Volleyball': 'Sports',
-        'Skateboarding': 'Sports', 'Snowboarding': 'Sports', 'Surfing': 'Sports',
-        'Cycling': 'Sports', 'Bicycle': 'Sports', 'Bmx Racing': 'Sports',
-        'Bullfighting': 'Sports', 'Rodeo': 'Sports', 'Western': 'Sports',
-        'Fishing': 'Sports', 'Hunting': 'Sports', 'Outdoors': 'Sports',
-        'Boat Racing': 'Sports', 'Drag Racing': 'Sports', 'Motorsports': 'Sports',
-        'Motorcycle': 'Sports', 'Motorcycle Racing': 'Sports',
-        'Judo': 'Sports', 'Karate': 'Sports', 'Billiards': 'Sports',
-
-        # Auto
-        'Auto': 'Auto & Motorsports', 'Auto Racing': 'Auto & Motorsports',
-
-        # Movies
-        'Adventure': 'Movies', 'Thriller': 'Movies', 'Suspense': 'Movies',
-        'Science Fiction': 'Movies', 'Fantasy': 'Movies', 'Horror': 'Movies',
-
-        # TV / Entertainment
-        'Entertainment': 'TV & Entertainment', 'Sitcom': 'TV & Entertainment',
-        'Drama': 'TV & Entertainment', 'Soap': 'TV & Entertainment',
-        'Talk': 'TV & Entertainment', 'Reality': 'TV & Entertainment',
-        'Comedy Drama': 'TV & Entertainment', 'History': 'TV & Entertainment',
-
-        # Comedy
-        'Comedy': 'Comedy', 'Romantic Comedy': 'Comedy',
-
-        # Romance
-        'Romance': 'Romance',
-
-        # Documentary
-        'Documentary': 'Documentary', 'Nature': 'Documentary',
-
-        # Music
-        'Music': 'Music',
-
-        # Anime
-        'Anime': 'Anime',
-
-        # Gaming & Tech
-        'Gaming': 'Gaming & Tech', 'Computers': 'Gaming & Tech',
-        'Esports': 'Gaming & Tech',
-
-        # Faith
-        'Faith': 'Faith & Family', 'Religious': 'Faith & Family',
-        'Family': 'Faith & Family',
-
-        # Health
-        'Health': 'Health', 'Medical': 'Health',
-    }
 
     channels = data.get('channels', {})
 
@@ -311,15 +372,16 @@ def generate_roku_m3u():
         group = ROKU_GROUP_MAP.get(raw_group, raw_group)
         group_map.setdefault(group, []).append((c_id, ch))
 
-    output_lines = ['#EXTM3U url-tvg="https://github.com/matthuisman/i.mjh.nz/raw/master/Roku/all.xml.gz"\n']
+    output_lines = [f'#EXTM3U url-tvg="{ROKU_EPG_URL}"\n']
     for group in sorted(group_map.keys()):
         for c_id, ch in sorted(group_map[group], key=lambda x: x[1].get('name', '').lower()):
+            stream_url = ROKU_STREAM_URL_TEMPLATE.format(id=c_id)
             output_lines.extend([
                 format_extinf(c_id, c_id, ch.get('chno'), ch['name'], ch['logo'], group, ch['name']),
-                f"https://jmp2.uk/rok-{c_id}.m3u8\n"
+                f"{stream_url}\n"
             ])
 
-    write_m3u_file("roku_all.m3u", "".join(output_lines))
+    write_m3u_file(ROKU_FILENAME, "".join(output_lines))
 
 # --- Tubi Scraping Logic ---
 
@@ -333,13 +395,12 @@ def get_proxies(country_code):
         return []
 
 def fetch_channel_list(proxy, retries=3):
-    url = "https://tubitv.com/live"
     for attempt in range(retries):
         try:
             if proxy:
-                response = requests.get(url, proxies={"http": proxy, "https": proxy}, verify=False, timeout=20)
+                response = requests.get(TUBI_LIVE_URL, proxies={"http": proxy, "https": proxy}, verify=False, timeout=20)
             else:
-                response = requests.get(url, verify=False, timeout=20)
+                response = requests.get(TUBI_LIVE_URL, verify=False, timeout=20)
             response.encoding = 'utf-8'
             if response.status_code != 200: continue
 
@@ -374,12 +435,10 @@ def create_group_mapping(json_data):
 
 def fetch_epg_data(channel_list):
     epg_data = []
-    group_size = 150
-    grouped_ids = [channel_list[i:i + group_size] for i in range(0, len(channel_list), group_size)]
+    grouped_ids = [channel_list[i:i + TUBI_EPG_GROUP_SIZE] for i in range(0, len(channel_list), TUBI_EPG_GROUP_SIZE)]
     for group in grouped_ids:
-        url = "https://tubitv.com/oz/epg/programming"
         params = {"content_id": ','.join(map(str, group))}
-        response = requests.get(url, params=params)
+        response = requests.get(TUBI_EPG_API_URL, params=params)
         if response.status_code == 200:
             epg_data.extend(response.json().get('rows', []))
     return epg_data
@@ -390,7 +449,7 @@ def clean_stream_url(url):
 
 def create_m3u_playlist(epg_data, group_mapping):
     sorted_epg_data = sorted(epg_data, key=lambda x: x.get('title', '').lower())
-    playlist = f"#EXTM3U url-tvg=\"tubi_epg.xml\"\n"
+    playlist = f'#EXTM3U url-tvg="{TUBI_EPG_FILENAME}"\n'
     seen_urls = set()
     for elem in sorted_epg_data:
         channel_name = elem.get('title', 'Unknown Channel').encode('utf-8', errors='ignore').decode('utf-8')
@@ -428,7 +487,7 @@ def create_epg_xml(epg_data):
     return ET.ElementTree(root)
 
 def generate_tubi_m3u():
-    proxies = get_proxies("US")
+    proxies = get_proxies(TUBI_PROXY_COUNTRY)
     json_data = None
     if proxies:
         for proxy in proxies:
@@ -448,16 +507,15 @@ def generate_tubi_m3u():
         group_mapping = create_group_mapping(json_data)
         m3u_playlist = create_m3u_playlist(epg_data, group_mapping)
         epg_tree = create_epg_xml(epg_data)
-        write_m3u_file("tubi_all.m3u", m3u_playlist)
-        epg_tree.write(os.path.join(OUTPUT_DIR, "tubi_epg.xml"), encoding='utf-8', xml_declaration=True)
+        write_m3u_file(TUBI_FILENAME, m3u_playlist)
+        epg_tree.write(os.path.join(OUTPUT_DIR, TUBI_EPG_FILENAME), encoding='utf-8', xml_declaration=True)
 
 # --- Execution ---
 
 if __name__ == "__main__":
     cleanup_output_dir()
-    generate_pluto_m3u()
-    generate_plex_m3u()
-    generate_samsungtvplus_m3u()
-    generate_tubi_m3u()
-    generate_roku_m3u()
-
+    if ENABLE_PLUTOTV: generate_pluto_m3u()
+    if ENABLE_PLEX: generate_plex_m3u()
+    if ENABLE_SAMSUNGTVPLUS: generate_samsungtvplus_m3u()
+    if ENABLE_TUBI: generate_tubi_m3u()
+    if ENABLE_ROKU: generate_roku_m3u()
